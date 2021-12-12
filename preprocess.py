@@ -1,6 +1,7 @@
 import copy
 import math
 import os
+import pickle
 import random
 import re
 import time
@@ -66,7 +67,7 @@ def normalizeString(s):
 
 
 def readLangs(lang1, lang2, file_path, reverse=False):
-    print("Reading lines...")
+    # print("Reading lines...")
 
     # Read the file and split into lines
     lines = open(file_path + '%s-%s.txt' % (lang1, lang2), encoding='utf-8'). \
@@ -103,16 +104,16 @@ def prepareData(lang1, lang2, MAX_LENGTH, eng_prefixes, file_path, reverse=False
     # 3. Make word lists from sentences in pairs
 
     input_lang, output_lang, pairs = readLangs(lang1, lang2, file_path, reverse)
-    print("Read %s sentence pairs" % len(pairs))
+    # print("Read %s sentence pairs" % len(pairs))
     pairs = filterPairs(pairs, MAX_LENGTH, eng_prefixes)
-    print("Trimmed to %s sentence pairs" % len(pairs))
-    print("Counting words...")
+    # print("Trimmed to %s sentence pairs" % len(pairs))
+    # print("Counting words...")
     for pair in pairs:
         input_lang.addSentence(pair[0])
         output_lang.addSentence(pair[1])
-    print("Counted words:")
-    print(input_lang.name, input_lang.n_words)
-    print(output_lang.name, output_lang.n_words)
+    # print("Counted words:")
+    # print(input_lang.name, input_lang.n_words)
+    # print(output_lang.name, output_lang.n_words)
     return input_lang, output_lang, pairs
 
 
@@ -147,9 +148,8 @@ def timeSince(since, percent):
 
 
 def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion, max_length,
-          device, SOS_token, EOS_token, teacher_forcing_ratio):
-    encoder_hidden = encoder.initHidden()
-
+          device, SOS_token, EOS_token, teacher_forcing_ratio, saved_model_device,
+          encoder_path, decoder_path):
     encoder_optimizer.zero_grad()
     decoder_optimizer.zero_grad()
 
@@ -161,29 +161,24 @@ def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, deco
     loss = 0
 
     for ei in range(input_length):
-        encoder_output, encoder_hidden = encoder(
-            input_tensor[ei], encoder_hidden)
+        encoder_output, encoder_hidden = encoder(input_tensor[ei])
         encoder_outputs[ei] = encoder_output[0, 0]
 
     decoder_input = torch.tensor([[SOS_token]], device=device)
-
-    decoder_hidden = encoder_hidden
 
     use_teacher_forcing = True if random.random() < teacher_forcing_ratio else False
 
     if use_teacher_forcing:
         # Teacher forcing: Feed the target as the next input
         for di in range(target_length):
-            decoder_output, decoder_hidden, decoder_attention = decoder(
-                decoder_input, decoder_hidden, encoder_outputs)
+            decoder_output, _, decoder_attention = decoder(decoder_input, encoder_hidden, encoder_outputs)
             loss += criterion(decoder_output, target_tensor[di])
             decoder_input = target_tensor[di]  # Teacher forcing
 
     else:
         # Without teacher forcing: use its own predictions as the next input
         for di in range(target_length):
-            decoder_output, decoder_hidden, decoder_attention = decoder(
-                decoder_input, decoder_hidden, encoder_outputs)
+            decoder_output, _, decoder_attention = decoder(decoder_input, encoder_hidden, encoder_outputs)
             topv, topi = decoder_output.topk(1)
             decoder_input = topi.squeeze().detach()  # detach from history as input
 
@@ -195,6 +190,7 @@ def train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, deco
 
     encoder_optimizer.step()
     decoder_optimizer.step()
+
 
     return loss.item() / target_length
 
@@ -224,7 +220,8 @@ def trainIters(encoder, decoder, n_iters, input_lang, output_lang, SOS_token, EO
         target_tensor = training_pair[1]
 
         loss = train(input_tensor, target_tensor, encoder, decoder, encoder_optimizer, decoder_optimizer, criterion,
-                     max_length, device, SOS_token, EOS_token, teacher_forcing_ratio)
+                     max_length, device, SOS_token, EOS_token, teacher_forcing_ratio, saved_model_device,
+                     encoder_path, decoder_path)
         print_loss_total += loss
         plot_loss_total += loss
 
@@ -237,12 +234,16 @@ def trainIters(encoder, decoder, n_iters, input_lang, output_lang, SOS_token, EO
             if print_loss_avg <= least_loss_avg:
                 least_loss_avg = print_loss_avg
 
+                print("Pickling in progress ...")
                 best_decoder = copy.deepcopy(decoder)
                 best_encoder = copy.deepcopy(encoder)
                 best_decoder.to(saved_model_device)
                 best_encoder.to(saved_model_device)
-                torch.save(best_decoder, decoder_path)
-                torch.save(best_encoder, encoder_path)
+                with open(decoder_path, "wb") as f:
+                    pickle.dump(best_decoder, f)
+                with open(encoder_path, "wb") as f:
+                    pickle.dump(best_encoder, f)
+                print("Pickling Done!")
 
         if iter % plot_every == 0:
             plot_loss_avg = plot_loss_total / plot_every
@@ -266,25 +267,20 @@ def evaluate(encoder, decoder, input_lang, output_lang, EOS_token, SOS_token, de
         input_tensor = tensorFromSentence(input_lang, sentence, EOS_token, device)
 
         input_length = input_tensor.size()[0]
-        encoder_hidden = encoder.initHidden()
 
         encoder_outputs = torch.zeros(max_length, encoder.hidden_size, device=device)
 
         for ei in range(input_length):
-            encoder_output, encoder_hidden = encoder(input_tensor[ei],
-                                                     encoder_hidden)
+            encoder_output, encoder_hidden = encoder(input_tensor[ei])
             encoder_outputs[ei] += encoder_output[0, 0]
 
         decoder_input = torch.tensor([[SOS_token]], device=device)  # SOS
-
-        decoder_hidden = encoder_hidden
 
         decoded_words = []
         decoder_attentions = torch.zeros(max_length, max_length)
 
         for di in range(max_length):
-            decoder_output, decoder_hidden, decoder_attention = decoder(
-                decoder_input, decoder_hidden, encoder_outputs)
+            decoder_output, _, decoder_attention = decoder(decoder_input, encoder_hidden, encoder_outputs)
             decoder_attentions[di] = decoder_attention.data
             topv, topi = decoder_output.data.topk(1)
             if topi.item() == EOS_token:
@@ -309,6 +305,7 @@ def evaluateRandomly(encoder, decoder, pairs, input_lang, output_lang, EOS_token
         print('<', output_sentence)
         print('')
 
+
 def showAttention(input_sentence, output_words, attentions):
     # Set up figure with colorbar
     fig = plt.figure()
@@ -330,8 +327,8 @@ def showAttention(input_sentence, output_words, attentions):
 
 def evaluateAndShowAttention(input_lang, encoder1, attn_decoder1, output_lang, EOS_token, SOS_token, device,
                              sentence, max_length):
-    output_words, attentions = evaluate(
-        encoder1, attn_decoder1, input_lang, output_lang, EOS_token, SOS_token, device, sentence, max_length)
+    output_words, attentions = evaluate(encoder1, attn_decoder1, input_lang, output_lang, EOS_token, SOS_token, device,
+                                        sentence, max_length)
     print('input =', sentence)
     print('output =', ' '.join(output_words))
     showAttention(sentence, output_words, attentions)

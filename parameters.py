@@ -1,6 +1,7 @@
 # Dataset
 import torch
 from torch import optim, nn
+import  model as md
 
 dataset_url = 'https://download.pytorch.org/tutorial/data.zip'
 save_zip_loc = 'data/data.zip'
@@ -27,8 +28,13 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 teacher_forcing_ratio = 0.5
 learning_rate = 0.01
 n_iters = 75000
+hidden_size = 256
 print_every = 5000
 plot_every = 100
+
+encoder = lambda x: md.EncoderGRU(x.n_words, hidden_size).to(device)
+attn_decoder = lambda x: md.AttnDecoderGRU(hidden_size, x.n_words, MAX_LENGTH, dropout_p=0.1).to(device)
+
 encoder_optimizer = lambda x: optim.SGD(x, lr=learning_rate)
 decoder_optimizer = lambda x: optim.SGD(x, lr=learning_rate)
 criterion = nn.NLLLoss()
